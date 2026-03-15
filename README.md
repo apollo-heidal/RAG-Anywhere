@@ -1,6 +1,16 @@
-# rag-anywhere
+# RAG-Anywhere
 
-An MCP-first runtime that gives agents a persistent RAG knowledge base. Upload files through signed browser or upload links, then query them through a unified interface that routes documents to [RAG-Anything](https://github.com/HKUDS/RAG-Anything) / [LightRAG](https://github.com/HKUDS/LightRAG), routes audio through local transcription into the document graph, and routes video through an in-process `VideoEngineAdapter` backed by vendored VideoRAG code.
+RAG-Anywhere is a distributed runtime for making any digital file queryable from any LLM system in minutes. It treats RAG as infrastructure rather than an app-specific feature: a user, agent, desktop tool, web app, or remote peer connects to a trusted RAG endpoint, uploads or routes content through signed flows, and queries a unified knowledge plane through MCP.
+
+In its finished form, RAG-Anywhere acts as the control plane, auth plane, routing plane, and execution plane for multimodal retrieval. It ingests documents, images, audio, video, and future file types through modality-specific engines; exposes MCP as the canonical agent interface; keeps HTTP for browser UX, uploads, and operational endpoints; and federates results across local and remote queryable peers without requiring raw source material to leave the node that owns it.
+
+The project is local-first in deployment shape and distributed-first in architecture. A single node works as a complete personal or team RAG runtime. Multiple nodes form a semi-trusted network of queryable peers, where access is explicit, transport is authenticated, and shared value comes from the output of retrieval systems rather than unrestricted replication of private source corpora.
+
+The long-term model is:
+
+- RAG any file: every important digital artifact becomes queryable through the right modality engine.
+- RAG anywhere: any trusted agent or application can attach to a RAG-Anywhere runtime through MCP and signed upload or UI flows.
+- RAG all at once: many peers can participate in one routed retrieval fabric, with provenance, auth, and policy preserved across the network.
 
 ## Prerequisites
 
@@ -48,7 +58,7 @@ Start the server first with `docker compose up --build`.
 
 | Tool | Description |
 |------|-------------|
-| `query` | Retrieve context using routed / federated RAG |
+| `query` | Retrieve context through the routed knowledge plane |
 | `create_ui_session_link` | Create a short-lived signed browser link to the library UI |
 | `create_upload_link` | Create a one-time upload URL for agent-driven file upload over HTTP |
 
@@ -85,38 +95,65 @@ Targets: `auto` (default) · `document` · `video` · `all`
 ## Architecture
 
 ```
-Claude / MCP Client
-      │ streamable-http (or stdio)
-      ▼
-  server.py  (Python + FastMCP)
-      │ routes by modality
-      ├──────────────► RAGAnything / LightRAG  (documents + transcripts)
-      │
-      └──────────────► VideoEngineAdapter  (in-process native video indexing)
-                              │
-                              ▼
-                    vendored VideoRAG + local vision / ASR models
+Agent / App / User / Trusted Peer
+              │
+              │ MCP for query and session bootstrap
+              │ HTTP for browser UX, uploads, health, and operations
+              ▼
+      RAG-Anywhere Runtime
+              │
+              ├──────────────► Control plane
+              │                 identity, trust, session grants, upload grants
+              │
+              ├──────────────► Routing plane
+              │                 modality routing, query federation, provenance
+              │
+              ├──────────────► Local engines
+              │                 documents, images, audio, video, future modalities
+              │
+              └──────────────► Queryable peers
+                                trusted remote runtimes that share retrieval output
 ```
 
-`server.py` is a single Python process that serves as the MCP surface, the browser UI surface, and the local runtime. MCP is the only RAG interface for agents. HTTP is kept for signed UI sessions, uploads, and health/admin endpoints. The server classifies uploads into document, audio, or video, records routing metadata in the manifest, and federates a single query across the document and video engines. The `VideoEngineAdapter` runs in the same process as the rest of the app, with per-video workspaces under `RAG_WORKING_DIR`. Embeddings are computed locally via SentenceTransformers. Config is loaded from environment variables, with `.env` as a fallback for local (non-Docker) runs.
+RAG-Anywhere presents one agent-facing RAG surface: MCP. Agents query the runtime, request signed UI links, and request one-time upload links. HTTP remains as an operational and user-facing companion surface, not as a second competing RAG API. Users open a signed library UI, upload content, inspect status, and manage a local knowledge node. Over time, the same runtime shape extends to trusted peer federation so that a node can route queries across local engines and approved remote peers while preserving access policy and provenance.
+
+The current codebase runs as a single Python process with local modality engines and a local manifest, but the architectural identity is broader: this process is the single-node form of a queryable peer runtime. It owns ingestion, indexing, signed access grants, query routing, and result federation. Local storage remains peer-local by default. Remote interaction is modeled as controlled query access, not raw filesystem sharing.
 
 ## Media routing
 
-- Documents are ingested directly into `RAGAnything`.
-- Document image metadata is extracted through a dedicated vision model path. If image metadata extraction fails and `VISION_REQUIRED=true`, document ingest fails instead of silently degrading.
-- Audio files are transcribed with a local ASR model, converted into timestamped transcript artifacts, then ingested into the document graph.
-- Video files are indexed by the in-process `VideoEngineAdapter`, which uses vendored VideoRAG code plus the local vision model to caption sampled frames and local ASR to transcribe segment audio.
-- Native video ingest probes source audio with `ffprobe` and extracts segment audio with `ffmpeg` before ASR. If a lecture-style video has an audio stream but segment extraction or transcription still fails, ingest ends as `error` instead of degrading silently.
-- Video ingest fails closed if native video indexing cannot complete. There is no transcript-only success path for video files.
+RAG-Anywhere treats file support as a runtime capability, not a special case:
+
+- Documents route into a document graph and multimodal parsing engine.
+- Images contribute metadata and semantics through a dedicated vision path.
+- Audio routes through local speech recognition and becomes timestamped knowledge.
+- Video routes through a native video engine that fuses visual descriptions, segment audio, timestamps, and graph extraction.
+- Future file classes fit into the same model: attach a modality engine, expose it through the routed runtime, and preserve provenance in the result set.
+
+The runtime fails closed when a required modality path cannot produce the metadata needed to make a file meaningfully queryable. The goal is not to accept any file extension and pretend success; the goal is to make any important digital artifact genuinely retrievable.
 
 The web UI at `/ui` is accessed through a signed session link and shows the detected modality, the selected ingest path, and the engine used for each file.
 
 ## Agent upload flow
 
-- Agents should not call an ingest tool with local filesystem paths. The MCP server cannot assume access to the agent host filesystem.
-- For browser-based interaction, call `create_ui_session_link` and open the returned URL.
-- For direct file transfer, call `create_upload_link` and `POST` the file to the returned one-time URL.
-- `create_upload_link` returns a generic `curl` example so shell-capable agents can upload files on macOS, Linux, or Windows environments that provide `curl`.
+Agents do not pass local filesystem paths into MCP and hope the server can see them. Instead:
+
+- MCP remains the control surface for query and session bootstrap.
+- `create_ui_session_link` returns a short-lived browser session for human-in-the-loop library access.
+- `create_upload_link` returns a one-time HTTP upload URL that any shell-capable agent can use to push bytes to the runtime.
+- The same model generalizes to remote peers: MCP establishes intent and trust, signed HTTP flows move user-facing sessions and upload payloads, and the runtime performs ingestion locally where the data is meant to live.
+
+This design makes the runtime easy to attach to desktop agents, web agents, local shells, and future remote peers without coupling RAG to a specific client filesystem or UI model.
+
+## Distributed Model
+
+RAG-Anywhere is built around the idea of a queryable peer:
+
+- A peer owns its local files, indexes, policies, and modality engines.
+- A peer exposes retrieval output through trusted interfaces rather than blindly exporting source material.
+- A peer can participate in a semi-trusted network where access is explicit and federated query is policy-aware.
+- A peer can serve one user, one team, or a wider subnet of connected runtimes.
+
+In the long run, the runtime is compatible with a private mesh or VPN trust layer, such as a Headscale-style WireGuard control plane, while still issuing application-layer session grants for browser and upload flows. Network trust and application trust complement each other: a device can belong to the network, but individual sessions, uploads, and agent actions still receive scoped, short-lived authorization.
 
 Useful runtime commands:
 
